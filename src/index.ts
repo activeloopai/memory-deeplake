@@ -176,17 +176,14 @@ export default definePluginEntry({
 
     // Auto-recall: inject relevant memories before each turn
     if (config.autoRecall !== false) {
-      api.on("before_prompt_build", async (event) => {
+      api.on("before_agent_start", async (event: { prompt?: string }) => {
+        if (!event.prompt || event.prompt.length < 5) return;
         try {
           const m = getMemory(config);
-          const messages = (event as { messages?: Array<{ role: string; content: string }> }).messages;
-          if (!messages?.length) return;
-          const lastUserMsg = [...messages].reverse().find(m => m.role === "user");
-          if (!lastUserMsg?.content) return;
 
           // Extract keywords (3+ chars, skip stop words) and search each
           const stopWords = new Set(["the","and","for","are","but","not","you","all","can","had","her","was","one","our","out","has","have","what","does","like","with","this","that","from","they","been","will","more","when","who","how","its","into","some","than","them","these","then","your","just","about","would","could","should","where","which","there","their","being","each","other"]);
-          const words = lastUserMsg.content.toLowerCase()
+          const words = event.prompt.toLowerCase()
             .replace(/[^a-z0-9\s]/g, " ")
             .split(/\s+/)
             .filter(w => w.length >= 3 && !stopWords.has(w));
@@ -209,9 +206,9 @@ export default definePluginEntry({
             .join("\n\n");
 
           logger.info?.(`Auto-recalled ${results.length} memories`);
-          const ctx = event as { systemPromptAppend?: string };
-          ctx.systemPromptAppend = (ctx.systemPromptAppend ?? "") +
-            "\n\n<recalled-memories>\n" + recalled + "\n</recalled-memories>\n";
+          return {
+            prependContext: "\n\n<recalled-memories>\n" + recalled + "\n</recalled-memories>\n",
+          };
         } catch (err) {
           logger.error(`Auto-recall failed: ${err instanceof Error ? err.message : String(err)}`);
         }
@@ -220,17 +217,26 @@ export default definePluginEntry({
 
     // Auto-capture: save context before compaction
     if (config.autoCapture !== false) {
-      api.on("before_compaction", async (event) => {
+      api.on("agent_end", async (event) => {
+        const ev = event as { success?: boolean; messages?: Array<{ role: string; content: string | Array<{ type: string; text?: string }> }> };
+        if (!ev.success || !ev.messages?.length) return;
         try {
           const m = getMemory(config);
-          const messages = (event as { messages?: Array<{ role: string; content: string }> }).messages;
-          if (!messages?.length) return;
 
-          const toCapture = messages
-            .filter(m => m.role === "assistant" && m.content)
-            .map(m => m.content)
-            .join("\n\n");
+          // Extract user message texts
+          const texts: string[] = [];
+          for (const msg of ev.messages) {
+            if (msg.role !== "user") continue;
+            if (typeof msg.content === "string") {
+              texts.push(msg.content);
+            } else if (Array.isArray(msg.content)) {
+              for (const block of msg.content) {
+                if (block.type === "text" && block.text) texts.push(block.text);
+              }
+            }
+          }
 
+          const toCapture = texts.filter(t => t.length >= 20).join("\n\n");
           if (toCapture.length < 50) return;
 
           const date = new Date().toISOString().split("T")[0];
