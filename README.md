@@ -1,4 +1,4 @@
-# deeplake-memory
+# pluri1bus
 
 Cloud-backed agent memory plugin for [OpenClaw](https://openclaw.ai) powered by [DeepLake](https://deeplake.ai).
 
@@ -10,7 +10,7 @@ curl -fsSL https://deeplake.ai/install.sh | bash
 deeplake init
 
 # Install the OpenClaw plugin
-openclaw plugins install deeplake-memory
+openclaw plugins install pluri1bus
 ```
 
 Then enable the write tool:
@@ -34,7 +34,7 @@ The plugin provides three tools:
 
 Plus automatic hooks:
 - **Auto-recall**  searches and injects relevant memories before each agent turn
-- **Auto-capture**  saves conversation context before compaction
+- **Auto-capture**  saves conversation context after each turn
 
 The plugin auto-detects your DeepLake mount from `~/.deeplake/mounts.json`. No API key or additional config needed.
 
@@ -43,10 +43,10 @@ The plugin auto-detects your DeepLake mount from `~/.deeplake/mounts.json`. No A
 All config is optional  the plugin works with zero config if DeepLake CLI is installed.
 
 ```json5
-// In openclaw.json → plugins.entries.deeplake-memory.config
+// In openclaw.json → plugins.entries.pluri1bus.config
 {
   "mountPath": "/path/to/mount",  // Override auto-detected mount path
-  "autoCapture": true,            // Auto-save memories before compaction
+  "autoCapture": true,            // Auto-save memories after each turn
   "autoRecall": true              // Auto-inject memories before each turn
 }
 ```
