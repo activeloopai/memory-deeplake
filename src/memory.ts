@@ -10,7 +10,7 @@ export interface SearchResult {
 }
 
 /**
- * Pluri1bus memory client — reads/writes/searches on the FUSE mount.
+ * Plur1bus memory client — reads/writes/searches on the FUSE mount.
  * Search uses grep for lexical matching.
  */
 export class DeepLakeMemory {

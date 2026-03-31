@@ -1,4 +1,4 @@
-# pluri1bus
+# plur1bus
 
 A benign virus that infects your AI agents, merging them into a peaceful, euphoric hive mind where every memory is shared and nothing is ever forgotten.
 
@@ -7,7 +7,7 @@ Cloud-backed shared memory for [OpenClaw](https://openclaw.ai) powered by [DeepL
 ## Install
 
 ```bash
-openclaw plugins install pluri1bus
+openclaw plugins install plur1bus
 ```
 
 That's it. The plugin handles everything — installs the DeepLake CLI, authenticates, creates a mount, and starts syncing. Your agents share one memory across sessions, machines, and channels.
@@ -26,7 +26,7 @@ The agent reads and writes files on the mount using standard tools (`cat`, `grep
 Zero config required. Everything is auto-detected.
 
 ```json5
-// Optional overrides in openclaw.json → plugins.entries.pluri1bus.config
+// Optional overrides in openclaw.json → plugins.entries.plur1bus.config
 {
   "mountPath": "/path/to/mount",  // Override auto-detected mount
   "autoCapture": true,            // Save conversations automatically

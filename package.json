@@ -1,5 +1,5 @@
 {
-  "name": "pluri1bus",
+  "name": "plur1bus",
   "version": "0.1.0",
   "type": "module",
   "description": "Pluri1bus — cloud-backed persistent memory for AI agents, powered by DeepLake",
@@ -7,13 +7,13 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/activeloopai/pluri1bus"
+    "url": "https://github.com/activeloopai/plur1bus"
   },
   "homepage": "https://deeplake.ai",
   "openclaw": {
     "extensions": ["./dist/index.js"],
     "install": {
-      "npmSpec": "pluri1bus",
+      "npmSpec": "plur1bus",
       "minHostVersion": ">=2026.3.22"
     },
     "compat": {

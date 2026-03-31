@@ -92,7 +92,7 @@ function getMemory(config: PluginConfig): DeepLakeMemory {
 }
 
 export default definePluginEntry({
-  id: "pluri1bus",
+  id: "plur1bus",
   name: "Pluri1bus",
   description: "Cloud-backed shared memory powered by DeepLake",
   kind: "memory",
