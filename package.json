@@ -2,7 +2,7 @@
   "name": "plur1bus",
   "version": "0.1.0",
   "type": "module",
-  "description": "Pluri1bus — cloud-backed persistent memory for AI agents, powered by DeepLake",
+  "description": "Plur1bus — cloud-backed persistent memory for AI agents, powered by DeepLake",
   "keywords": ["openclaw", "memory", "deeplake", "agent", "persistent-memory", "shared-memory"],
   "license": "MIT",
   "repository": {
