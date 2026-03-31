@@ -1,7 +1,7 @@
 {
-  "id": "deeplake-memory",
+  "id": "pluri1bus",
   "kind": "memory",
-  "name": "DeepLake Memory",
+  "name": "Pluri1bus",
   "description": "Cloud-backed agent memory powered by DeepLake  persistent filesystem with grep-based search, auto-capture and auto-recall",
   "uiHints": {
     "mountPath": {
