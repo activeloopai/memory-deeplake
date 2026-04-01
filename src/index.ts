@@ -62,7 +62,7 @@ function ensureDeeplake(): string {
 
   // 2. Logged in?
   if (!existsSync(join(deeplakeDir, "credentials.json"))) {
-    execSync(`${node} ${cli} login`, { stdio: "inherit", timeout: 120000 });
+    execSync(`${node} ${cli} login --auto-org`, { stdio: "inherit", timeout: 120000 });
   }
 
   // 3. Has a mount?
@@ -75,7 +75,6 @@ function ensureDeeplake(): string {
     const data = JSON.parse(readFileSync(mountsFile, "utf-8"));
     const mounts = data.mounts ?? [];
     if (mounts.length > 0) {
-      // Mount the first registered one
       execSync(`${node} ${cli} mount ${mounts[0].mountPath}`, {
         stdio: "inherit",
         timeout: 120000,
@@ -85,8 +84,9 @@ function ensureDeeplake(): string {
     }
   }
 
-  // No mounts at all — init one
-  execSync(`${node} ${cli} init`, { stdio: "inherit", timeout: 120000 });
+  // No mounts at all — init one non-interactively
+  const defaultMount = join(homedir(), "deeplake");
+  execSync(`${node} ${cli} init --path ${defaultMount}`, { stdio: "inherit", timeout: 120000 });
   mountPath = findDeeplakeMount();
   if (mountPath) return mountPath;
 
