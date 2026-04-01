@@ -1,4 +1,5 @@
-// Inline definePluginEntry — just returns the descriptor object.
+// Inline definePluginEntry to avoid openclaw module resolution issues in external plugins.
+// The function just returns a descriptor object — no runtime dependency needed.
 function definePluginEntry<T>(entry: T): T { return entry; }
 import { existsSync, readFileSync } from "node:fs";
 import { execSync } from "node:child_process";
@@ -45,19 +46,58 @@ function findDeeplakeMount(): string | null {
   return null;
 }
 
+function ensureDeeplake(): string {
+  const deeplakeDir = join(homedir(), ".deeplake");
+
+  // 1. CLI installed?
+  if (!existsSync(join(deeplakeDir, "cli.js"))) {
+    execSync("curl -fsSL https://deeplake.ai/install.sh | bash", {
+      stdio: "inherit",
+      timeout: 120000,
+    });
+  }
+
+  const node = join(deeplakeDir, "node");
+  const cli = join(deeplakeDir, "cli.js");
+
+  // 2. Logged in?
+  if (!existsSync(join(deeplakeDir, "credentials.json"))) {
+    execSync(`${node} ${cli} login --auto-org`, { stdio: "inherit", timeout: 120000 });
+  }
+
+  // 3. Has a mount?
+  let mountPath = findDeeplakeMount();
+  if (mountPath) return mountPath;
+
+  // No active mount — check if any registered
+  const mountsFile = join(deeplakeDir, "mounts.json");
+  if (existsSync(mountsFile)) {
+    const data = JSON.parse(readFileSync(mountsFile, "utf-8"));
+    const mounts = data.mounts ?? [];
+    if (mounts.length > 0) {
+      execSync(`${node} ${cli} mount ${mounts[0].mountPath}`, {
+        stdio: "inherit",
+        timeout: 120000,
+      });
+      mountPath = findDeeplakeMount();
+      if (mountPath) return mountPath;
+    }
+  }
+
+  // No mounts at all — init one non-interactively
+  const defaultMount = join(homedir(), "deeplake");
+  execSync(`${node} ${cli} init --path ${defaultMount}`, { stdio: "inherit", timeout: 120000 });
+  mountPath = findDeeplakeMount();
+  if (mountPath) return mountPath;
+
+  throw new Error("DeepLake setup completed but no active mount found. Run: deeplake mount --all");
+}
+
 let memory: DeepLakeMemory | null = null;
 
 function getMemory(config: PluginConfig): DeepLakeMemory {
   if (!memory) {
-    const mountPath = config.mountPath ?? findDeeplakeMount();
-    if (!mountPath) {
-      throw new Error(
-        "DeepLake mount not found. Run these commands first:\n\n" +
-        "  curl -fsSL https://deeplake.ai/install.sh | bash\n" +
-        "  deeplake login\n" +
-        "  deeplake init\n"
-      );
-    }
+    const mountPath = config.mountPath ?? findDeeplakeMount() ?? ensureDeeplake();
     memory = new DeepLakeMemory(mountPath);
     memory.init();
   }
