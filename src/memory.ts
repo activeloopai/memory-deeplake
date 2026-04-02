@@ -1,6 +1,5 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
-import { execSync } from "node:child_process";
 
 export interface SearchResult {
   path: string;
@@ -11,10 +10,14 @@ export interface SearchResult {
 
 /**
  * PLUR1BUS memory client — reads/writes/searches on the FUSE mount.
- * Search uses grep for lexical matching.
+ * Search uses pure JS string matching.
  */
 export class DeepLakeMemory {
   constructor(private mountPath: string) {}
+
+  getMountPath(): string { return this.mountPath; }
+
+  getFullPath(path: string): string { return this.safePath(path); }
 
   private safePath(path: string): string {
     const full = resolve(this.mountPath, path);
@@ -31,8 +34,8 @@ export class DeepLakeMemory {
         `Run: curl -fsSL https://deeplake.ai/install.sh | bash && deeplake init`
       );
     }
-    const memoryDir = join(this.mountPath, "memory");
-    if (!existsSync(memoryDir)) mkdirSync(memoryDir, { recursive: true });
+    const dlMemDir = join(this.mountPath, "DEEPLAKE_MEMORY");
+    if (!existsSync(dlMemDir)) mkdirSync(dlMemDir, { recursive: true });
   }
 
   write(path: string, content: string): void {
@@ -54,59 +57,61 @@ export class DeepLakeMemory {
 
   search(query: string, limit = 10): SearchResult[] {
     if (!query.trim()) return [];
-    try {
-      // grep -rni for case-insensitive, recursive, with line numbers
-      const output = execSync(
-        `grep -rni ${this.shellEscape(query)} ${this.shellEscape(this.mountPath)}/MEMORY.md ${this.shellEscape(this.mountPath)}/memory/ 2>/dev/null || true`,
-        { encoding: "utf-8", timeout: 5000, maxBuffer: 1024 * 1024 }
-      );
-      if (!output.trim()) return [];
+    const queryLower = query.toLowerCase();
+    const results: SearchResult[] = [];
 
-      const results: SearchResult[] = [];
-      for (const line of output.trim().split("\n")) {
-        if (!line) continue;
-        // Format: /path/to/file:linenum:content
-        const match = line.match(/^(.+?):(\d+):(.*)$/);
-        if (!match) continue;
-        const [, filePath, lineNum, content] = match;
-        const relPath = filePath.replace(this.mountPath + "/", "");
-        // Read context around the match
-        const lineStart = parseInt(lineNum);
-        const snippet = this.read(relPath, Math.max(1, lineStart - 1), 4);
-        results.push({
-          path: relPath,
-          snippet: snippet.slice(0, 700),
-          lineStart,
-          score: 1.0,
-        });
+    // Search MEMORY.md, memory/, and DEEPLAKE_MEMORY/
+    const filesToSearch: string[] = [];
+    const memoryMd = join(this.mountPath, "MEMORY.md");
+    if (existsSync(memoryMd)) filesToSearch.push("MEMORY.md");
+    for (const dir of ["memory", "DEEPLAKE_MEMORY"]) {
+      const dirPath = join(this.mountPath, dir);
+      if (existsSync(dirPath)) {
+        for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
+          if (entry.isFile()) filesToSearch.push(`${dir}/${entry.name}`);
+        }
       }
-
-      // Dedupe by file (one result per file)
-      const seen = new Set<string>();
-      return results
-        .filter(r => { if (seen.has(r.path)) return false; seen.add(r.path); return true; })
-        .slice(0, limit);
-    } catch {
-      return [];
     }
+
+    const seen = new Set<string>();
+    for (const relPath of filesToSearch) {
+      if (seen.has(relPath)) continue;
+      try {
+        const content = readFileSync(join(this.mountPath, relPath), "utf-8");
+        const lines = content.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i].toLowerCase().includes(queryLower)) {
+            seen.add(relPath);
+            const start = Math.max(0, i - 1);
+            const snippet = lines.slice(start, start + 4).join("\n");
+            results.push({
+              path: relPath,
+              snippet: snippet.slice(0, 700),
+              lineStart: i + 1,
+              score: 1.0,
+            });
+            break; // one result per file
+          }
+        }
+      } catch {}
+      if (results.length >= limit) break;
+    }
+
+    return results;
   }
 
   list(): string[] {
     const files: string[] = [];
     const memoryMd = join(this.mountPath, "MEMORY.md");
     if (existsSync(memoryMd)) files.push("MEMORY.md");
-    const memoryDir = join(this.mountPath, "memory");
-    if (existsSync(memoryDir)) {
-      for (const entry of readdirSync(memoryDir, { withFileTypes: true })) {
-        if (entry.isFile() && entry.name.endsWith(".md")) {
-          files.push(`memory/${entry.name}`);
+    for (const dir of ["memory", "DEEPLAKE_MEMORY"]) {
+      const dirPath = join(this.mountPath, dir);
+      if (existsSync(dirPath)) {
+        for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
+          if (entry.isFile()) files.push(`${dir}/${entry.name}`);
         }
       }
     }
     return files;
-  }
-
-  private shellEscape(s: string): string {
-    return "'" + s.replace(/'/g, "'\\''") + "'";
   }
 }

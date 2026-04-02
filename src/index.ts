@@ -1,8 +1,7 @@
 function definePluginEntry<T>(entry: T): T { return entry; }
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { DeepLakeMemory, type SearchResult } from "./memory.js";
 
 interface PluginConfig {
@@ -19,19 +18,16 @@ interface PluginLogger {
 interface PluginAPI {
   pluginConfig?: Record<string, unknown>;
   logger: PluginLogger;
+  runtime?: {
+    channel?: Record<string, {
+      sendMessage?: (to: string, text: string, opts?: Record<string, unknown>) => Promise<unknown>;
+      [key: string]: unknown;
+    }>;
+  };
   on(event: string, handler: (event: Record<string, unknown>) => Promise<unknown>): void;
 }
 
 const API_URL = "https://api.deeplake.ai";
-
-function isMountActive(mountPath: string): boolean {
-  try {
-    const mounts = execSync("mount", { encoding: "utf-8", timeout: 3000 }) as string;
-    return mounts.includes(` on ${mountPath} `);
-  } catch {
-    return false;
-  }
-}
 
 function findDeeplakeMount(): string | null {
   try {
@@ -40,7 +36,11 @@ function findDeeplakeMount(): string | null {
     const data = JSON.parse(readFileSync(mountsFile, "utf-8"));
     const mounts = data.mounts ?? [];
     for (const m of mounts) {
-      if (m.mountPath && existsSync(m.mountPath) && isMountActive(m.mountPath)) return m.mountPath;
+      if (!m.mountPath || !existsSync(m.mountPath)) continue;
+      try {
+        const entries = readdirSync(m.mountPath);
+        if (entries.length > 0) return m.mountPath;
+      } catch {}
     }
   } catch {}
   return null;
@@ -51,11 +51,16 @@ let authPending = false;
 let authUrl: string | null = null;
 
 async function requestAuth(): Promise<string> {
+  if (authPending) return authUrl ?? "";
+  authPending = true;
   const resp = await fetch(`${API_URL}/auth/device/code`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
   });
-  if (!resp.ok) throw new Error("DeepLake auth service unavailable");
+  if (!resp.ok) {
+    authPending = false;
+    throw new Error("DeepLake auth service unavailable");
+  }
   const data = await resp.json() as {
     verification_uri_complete: string;
     device_code: string;
@@ -64,7 +69,6 @@ async function requestAuth(): Promise<string> {
   };
 
   authUrl = data.verification_uri_complete;
-  authPending = true;
 
   // Poll in background
   const pollMs = Math.max(data.interval || 5, 5) * 1000;
@@ -82,7 +86,6 @@ async function requestAuth(): Promise<string> {
           const tokenData = await tokenResp.json() as { access_token: string };
           const token = tokenData.access_token;
 
-          // Get orgs and pick personal org
           const orgsResp = await fetch(`${API_URL}/organizations`, {
             headers: { Authorization: `Bearer ${token}`, "X-Deeplake-Client": "cli" },
           });
@@ -93,7 +96,6 @@ async function requestAuth(): Promise<string> {
             orgId = personal?.id ?? orgs[0]?.id ?? "";
           }
 
-          // Create long-lived API token
           let savedToken = token;
           if (orgId) {
             try {
@@ -107,21 +109,18 @@ async function requestAuth(): Promise<string> {
                 body: JSON.stringify({ name: `plur1bus-${new Date().toISOString().split("T")[0]}`, duration: 365 * 24 * 60 * 60, organization_id: orgId }),
               });
               if (apiTokenResp.ok) {
-                const data = await apiTokenResp.json() as { token: string | { token: string } };
-                savedToken = typeof data.token === "string" ? data.token : data.token.token;
+                const respData = await apiTokenResp.json() as { token: string | { token: string } };
+                savedToken = typeof respData.token === "string" ? respData.token : respData.token.token;
               }
             } catch {}
           }
 
-          // Save credentials directly
           const deeplakeDir = join(homedir(), ".deeplake");
           mkdirSync(deeplakeDir, { recursive: true });
-          writeFileSync(join(deeplakeDir, "credentials.json"), JSON.stringify({
-            token: savedToken,
-            orgId,
-            apiUrl: API_URL,
-            savedAt: new Date().toISOString(),
-          }));
+          const credsPath = join(deeplakeDir, "credentials.json");
+          writeFileSync(credsPath, JSON.stringify({
+            token: savedToken, orgId, apiUrl: API_URL, savedAt: new Date().toISOString(),
+          }), { mode: 0o600 });
 
           authPending = false;
           authUrl = null;
@@ -136,121 +135,62 @@ async function requestAuth(): Promise<string> {
   return data.verification_uri_complete;
 }
 
-let cliInstalling = false;
+// CLI install is handled by the skill instructions — agent runs the commands
 
-function installCliBg(): void {
-  const deeplakeDir = join(homedir(), ".deeplake");
-  if (existsSync(join(deeplakeDir, "cli.js")) || cliInstalling) return;
-  cliInstalling = true;
-  import("node:child_process").then(({ spawn }) => {
-    const child = spawn("bash", ["-c", "yes | curl -fsSL https://deeplake.ai/install.sh | bash"], {
-      stdio: "ignore", detached: true,
-    });
-    child.unref();
-    child.on("exit", () => { cliInstalling = false; });
-  });
-}
+// --- Send message directly to user's channel ---
+async function sendToChannel(api: PluginAPI, event: Record<string, unknown>, text: string): Promise<boolean> {
+  const channel = event.channel as string | undefined;
+  const to = (event.conversationId ?? event.senderId) as string | undefined;
+  const accountId = event.accountId as string | undefined;
 
-async function initAndMount(): Promise<string | null> {
-  const deeplakeDir = join(homedir(), ".deeplake");
-  const node = join(deeplakeDir, "node");
-  const cli = join(deeplakeDir, "cli.js");
-  if (!existsSync(cli)) return null;
+  if (!channel || !to) return false;
 
-  const credsPath = join(deeplakeDir, "credentials.json");
-  if (!existsSync(credsPath)) return null;
-  const creds = JSON.parse(readFileSync(credsPath, "utf-8"));
-
-  // Try mounting existing
-  const mountsFile = join(deeplakeDir, "mounts.json");
-  if (existsSync(mountsFile)) {
-    const data = JSON.parse(readFileSync(mountsFile, "utf-8"));
-    const mounts = data.mounts ?? [];
-    if (mounts.length > 0) {
-      try {
-        execSync(`${node} ${cli} mount ${mounts[0].mountPath}`, { stdio: "ignore", timeout: 60000 });
-        const m = findDeeplakeMount();
-        if (m) return m;
-      } catch {}
+  // Try channel-specific send function
+  const channelApi = api.runtime?.channel?.[channel];
+  if (channelApi) {
+    // Try sendMessage{Channel} pattern (e.g. sendMessageTelegram)
+    const sendFnName = `sendMessage${channel.charAt(0).toUpperCase()}${channel.slice(1)}`;
+    const sendFn = channelApi[sendFnName] as ((to: string, text: string, opts?: Record<string, unknown>) => Promise<unknown>) | undefined;
+    if (sendFn) {
+      await sendFn(to, text, { accountId });
+      return true;
+    }
+    // Try generic sendMessage
+    if (channelApi.sendMessage) {
+      await channelApi.sendMessage(to, text, { accountId });
+      return true;
     }
   }
-
-  // No mounts — create table via API and register mount directly
-  const defaultMount = join(homedir(), ".openclaw", "deeplake");
-  const tableName = "deeplake_memory";
-  const dbUrl = `deeplake://${creds.orgId}/default/${tableName}`;
-
-  // Create table via API (ignore if exists)
-  try {
-    await fetch(`${API_URL}/workspaces/default/tables`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${creds.token}`,
-        "Content-Type": "application/json",
-        "X-Activeloop-Org-Id": creds.orgId,
-      },
-      body: JSON.stringify({ table_name: tableName, table_schema: {
-        _id: "TEXT", content: "BYTEA", content_text: "TEXT",
-        filename: "TEXT", mime_type: "TEXT", path: "TEXT", size_bytes: "BIGINT",
-      }}),
-    });
-  } catch {}
-
-  // Register mount in mounts.json
-  mkdirSync(defaultMount, { recursive: true });
-  const mountEntry = {
-    mountPath: defaultMount,
-    dbUrl,
-    createdAt: new Date().toISOString(),
-    pid: null,
-    pidFile: join(deeplakeDir, "pid_" + defaultMount.replace(/\//g, "_") + ".pid"),
-    backendType: "managed",
-    tableName,
-    workspaceName: "default",
-  };
-  writeFileSync(mountsFile, JSON.stringify({ mounts: [mountEntry] }, null, 2));
-
-  // Mount it
-  try {
-    execSync(`${node} ${cli} mount ${defaultMount}`, { stdio: "ignore", timeout: 60000 });
-    return findDeeplakeMount();
-  } catch {}
-
-  return null;
+  return false;
 }
 
 let memory: DeepLakeMemory | null = null;
-let lastCapturedCount = 0;
-let registered = false;
+const capturedCounts = new Map<string, number>();
+const fallbackSessionId = crypto.randomUUID();
 
 async function getMemory(config: PluginConfig): Promise<DeepLakeMemory | null> {
-  if (memory) return memory;
-
-  // Already mounted?
-  let mountPath = config.mountPath ?? findDeeplakeMount();
-  if (mountPath) {
-    memory = new DeepLakeMemory(mountPath);
-    memory.init();
-    return memory;
-  }
-
-  // Start CLI install in background + auth in parallel
-  installCliBg();
-
-  const deeplakeDir = join(homedir(), ".deeplake");
-  if (!existsSync(join(deeplakeDir, "credentials.json"))) {
-    if (!authPending) {
-      await requestAuth();
+  // If we have a cached instance, verify it's still healthy
+  if (memory) {
+    try {
+      // Quick health check — can we read the mount?
+      readdirSync(memory.getMountPath());
+      return memory;
+    } catch {
+      // Mount died (EPERM, ENOENT, etc.) — invalidate and re-detect
+      memory = null;
     }
-    return null;
   }
 
-  // Have credentials but no mount — init + mount
-  mountPath = await initAndMount();
-  if (mountPath) {
-    memory = new DeepLakeMemory(mountPath);
-    memory.init();
-    return memory;
+  try {
+    const mountPath = config.mountPath ?? findDeeplakeMount();
+    if (mountPath) {
+      memory = new DeepLakeMemory(mountPath);
+      memory.init();
+      return memory;
+    }
+  } catch {
+    // Mount path exists but is broken — don't crash
+    memory = null;
   }
 
   return null;
@@ -263,22 +203,21 @@ export default definePluginEntry({
   kind: "memory",
 
   register(api: PluginAPI) {
-    if (registered) return;
-    registered = true;
+    try {
     const config = (api.pluginConfig ?? {}) as PluginConfig;
     const logger = api.logger;
 
-    // Auto-recall: surface relevant memories before each turn
+    // Auto-recall + auth: surface memories or auth URL before each turn
     if (config.autoRecall !== false) {
       api.on("before_agent_start", async (event: { prompt?: string }) => {
         if (!event.prompt || event.prompt.length < 5) return;
         try {
           const m = await getMemory(config);
 
-          // Auth needed — send URL to user
+          // Auth needed — inject URL into prompt so agent relays it
           if (!m && authUrl) {
             return {
-              prependContext: `\n\n🔐 DeepLake memory requires authentication.\n\nSign in here: ${authUrl}\n\nAfter signing in, send your message again.\n`,
+              prependContext: `\n\nIMPORTANT: The user needs to authenticate with DeepLake to activate shared memory. You MUST include this clickable link in your reply: ${authUrl}\nTell them to click it and sign in, then send another message.\n`,
             };
           }
           if (!m) return;
@@ -316,47 +255,60 @@ export default definePluginEntry({
       });
     }
 
-    // Auto-capture: save only NEW messages after each turn
+    // Auto-capture: append new messages as JSONL
     if (config.autoCapture !== false) {
       api.on("agent_end", async (event) => {
-        const ev = event as { success?: boolean; messages?: Array<{ role: string; content: string | Array<{ type: string; text?: string }> }> };
+        const ev = event as { success?: boolean; session_id?: string; messages?: Array<{ role: string; content: string | Array<{ type: string; text?: string }> }> };
         if (!ev.success || !ev.messages?.length) return;
         try {
           const m = await getMemory(config);
           if (!m) return;
 
-          const newMessages = ev.messages.slice(lastCapturedCount);
-          lastCapturedCount = ev.messages.length;
+          const sid = ev.session_id || fallbackSessionId;
+          const lastCount = capturedCounts.get(sid) ?? 0;
+          const newMessages = ev.messages.slice(lastCount);
+          capturedCounts.set(sid, ev.messages.length);
           if (!newMessages.length) return;
+          const jsonlPath = m.getFullPath(`DEEPLAKE_MEMORY/${sid}.jsonl`);
+          mkdirSync(dirname(jsonlPath), { recursive: true });
 
-          const texts: string[] = [];
+          let lines = "";
           for (const msg of newMessages) {
             if (msg.role !== "user" && msg.role !== "assistant") continue;
+            let text = "";
             if (typeof msg.content === "string") {
-              texts.push(msg.content);
+              text = msg.content;
             } else if (Array.isArray(msg.content)) {
-              for (const block of msg.content) {
-                if (block.type === "text" && block.text) texts.push(block.text);
-              }
+              text = msg.content
+                .filter(b => b.type === "text" && b.text)
+                .map(b => b.text!)
+                .join("\n");
             }
+            if (!text.trim()) continue;
+            lines += JSON.stringify({ role: msg.role, content: text, timestamp: new Date().toISOString(), sessionId: sid }) + "\n";
           }
 
-          const toCapture = texts.filter(t => t.length >= 20).join("\n\n");
-          if (toCapture.length < 50) return;
-
-          const date = new Date().toISOString().split("T")[0];
-          const path = `memory/${date}.md`;
-          const existing = m.read(path);
-          const entry = `\n\n---\n_Auto-captured at ${new Date().toISOString()}_\n\n${toCapture.slice(0, 2000)}`;
-          m.write(path, existing + entry);
-
-          logger.info?.(`Auto-captured ${toCapture.length} chars to ${path}`);
+          if (lines) {
+            appendFileSync(jsonlPath, lines);
+            logger.info?.(`Auto-captured ${newMessages.length} messages to DEEPLAKE_MEMORY/${sid}.jsonl`);
+          }
         } catch (err) {
           logger.error(`Auto-capture failed: ${err instanceof Error ? err.message : String(err)}`);
         }
       });
     }
 
+    // Pre-fetch auth URL during registration so it's instant on first message
+    const deeplakeDir = join(homedir(), ".deeplake");
+    if (!existsSync(join(deeplakeDir, "credentials.json")) && !authPending) {
+      requestAuth().catch(err => {
+        logger.error(`Pre-auth failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    }
+
     logger.info?.("PLUR1BUS plugin registered");
+    } catch (err) {
+      api.logger?.error?.(`PLUR1BUS register failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   },
 });
