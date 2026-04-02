@@ -1,6 +1,6 @@
 {
   "name": "deeplake-plugin",
-  "version": "0.3.0",
+  "version": "0.3.5",
   "type": "module",
   "description": "DeepLake Memory — cloud-backed persistent shared memory for AI agents",
   "keywords": [
