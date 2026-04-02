@@ -1,14 +1,9 @@
 {
-  "id": "plur1bus",
+  "id": "deeplake-plugin",
   "kind": "memory",
-  "name": "PLUR1BUS",
-  "description": "Cloud-backed shared memory powered by DeepLake persistent filesystem with auto-capture and auto-recall",
+  "name": "DeepLake Memory",
+  "description": "Cloud-backed shared memory powered by DeepLake — auto-capture and auto-recall via REST API",
   "uiHints": {
-    "mountPath": {
-      "label": "Mount Path",
-      "advanced": true,
-      "placeholder": "Auto-detected from ~/.deeplake/mounts.json"
-    },
     "autoCapture": {
       "label": "Auto-Capture"
     },
@@ -20,7 +15,6 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "mountPath": { "type": "string" },
       "autoCapture": { "type": "boolean" },
       "autoRecall": { "type": "boolean" }
     }

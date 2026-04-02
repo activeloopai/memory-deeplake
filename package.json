@@ -1,8 +1,8 @@
 {
-  "name": "plur1bus",
-  "version": "0.2.0",
+  "name": "deeplake-plugin",
+  "version": "0.3.0",
   "type": "module",
-  "description": "PLUR1BUS — cloud-backed persistent memory for AI agents, powered by DeepLake",
+  "description": "DeepLake Memory — cloud-backed persistent shared memory for AI agents",
   "keywords": ["openclaw", "memory", "deeplake", "agent", "persistent-memory", "shared-memory"],
   "license": "MIT",
   "repository": {
@@ -13,14 +13,11 @@
   "openclaw": {
     "extensions": ["./dist/index.js"],
     "install": {
-      "npmSpec": "plur1bus",
+      "npmSpec": "deeplake-plugin",
       "minHostVersion": ">=2026.3.22"
     },
     "compat": {
       "pluginApi": ">=1.0.0"
-    },
-    "build": {
-      "openclawVersion": "2026.3.22"
     }
   },
   "files": ["dist", "openclaw.plugin.json"],

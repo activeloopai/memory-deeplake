@@ -1,6 +1,3 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
-import { join, dirname, resolve } from "node:path";
-
 export interface SearchResult {
   path: string;
   snippet: string;
@@ -8,110 +5,110 @@ export interface SearchResult {
   score: number;
 }
 
+const TABLE_NAME = "deeplake_plugin_memory";
+
 /**
- * PLUR1BUS memory client — reads/writes/searches on the FUSE mount.
- * Search uses pure JS string matching.
+ * DeepLake REST API client for memory operations.
+ * All operations use fetch() — pure HTTP, no shell commands.
  */
-export class DeepLakeMemory {
-  constructor(private mountPath: string) {}
+export class DeepLakeAPI {
+  private tableReady = false;
 
-  getMountPath(): string { return this.mountPath; }
+  constructor(
+    private token: string,
+    private orgId: string,
+    private apiUrl: string,
+    private workspace: string = "default",
+  ) {}
 
-  getFullPath(path: string): string { return this.safePath(path); }
-
-  private safePath(path: string): string {
-    const full = resolve(this.mountPath, path);
-    if (!full.startsWith(resolve(this.mountPath))) {
-      throw new Error(`Path traversal rejected: ${path}`);
+  private async query(sql: string): Promise<{ columns: string[]; rows: unknown[][]; row_count: number }> {
+    const resp = await fetch(`${this.apiUrl}/workspaces/${this.workspace}/tables/query`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        "Content-Type": "application/json",
+        "X-Activeloop-Org-Id": this.orgId,
+      },
+      body: JSON.stringify({ query: sql }),
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      throw new Error(`API ${resp.status}: ${text.slice(0, 200)}`);
     }
-    return full;
+    return resp.json();
   }
 
-  init(): void {
-    if (!existsSync(this.mountPath)) {
-      throw new Error(
-        `DeepLake FUSE mount not found at ${this.mountPath}. ` +
-        `Run: curl -fsSL https://deeplake.ai/install.sh | bash && deeplake init`
-      );
+  async ensureTable(): Promise<void> {
+    if (this.tableReady) return;
+    try {
+      await fetch(`${this.apiUrl}/workspaces/${this.workspace}/tables`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          "Content-Type": "application/json",
+          "X-Activeloop-Org-Id": this.orgId,
+        },
+        body: JSON.stringify({
+          table_name: TABLE_NAME,
+          table_schema: {
+            id: "TEXT",
+            session_id: "TEXT",
+            role: "TEXT",
+            content: "TEXT",
+            timestamp: "TEXT",
+            channel: "TEXT",
+            sender: "TEXT",
+          },
+        }),
+      });
+    } catch {
+      // Table might already exist — that's fine
     }
-    const dlMemDir = join(this.mountPath, "DEEPLAKE_MEMORY");
-    if (!existsSync(dlMemDir)) mkdirSync(dlMemDir, { recursive: true });
+    this.tableReady = true;
   }
 
-  write(path: string, content: string): void {
-    const fullPath = this.safePath(path);
-    mkdirSync(dirname(fullPath), { recursive: true });
-    writeFileSync(fullPath, content);
+  async write(
+    sessionId: string,
+    role: string,
+    content: string,
+    channel?: string,
+    sender?: string,
+  ): Promise<void> {
+    await this.ensureTable();
+    const id = crypto.randomUUID();
+    const ts = new Date().toISOString();
+    const esc = (s: string) => s.replace(/'/g, "''");
+    const sql = `INSERT INTO "${TABLE_NAME}" (id, session_id, role, content, timestamp, channel, sender) VALUES ('${esc(id)}', '${esc(sessionId)}', '${esc(role)}', '${esc(content)}', '${esc(ts)}', '${esc(channel ?? "")}', '${esc(sender ?? "")}')`;
+    await this.query(sql);
   }
 
-  read(path: string, startLine?: number, numLines?: number): string {
-    const fullPath = this.safePath(path);
-    if (!existsSync(fullPath)) return "";
-    const content = readFileSync(fullPath, "utf-8");
-    if (startLine === undefined) return content;
-    const lines = content.split("\n");
-    const start = Math.max(0, startLine - 1);
-    const end = numLines ? start + numLines : lines.length;
-    return lines.slice(start, end).join("\n");
+  async search(queryText: string, limit = 10): Promise<SearchResult[]> {
+    if (!queryText.trim()) return [];
+    await this.ensureTable();
+    const esc = queryText.replace(/'/g, "''");
+    const sql = `SELECT session_id, role, content, timestamp FROM "${TABLE_NAME}" WHERE content ILIKE '%${esc}%' ORDER BY timestamp DESC LIMIT ${limit}`;
+    try {
+      const result = await this.query(sql);
+      return result.rows.map((row, i) => ({
+        path: `session:${row[0]}`,
+        snippet: `[${row[1]}] ${String(row[2]).slice(0, 500)}`,
+        lineStart: i + 1,
+        score: 1.0,
+      }));
+    } catch {
+      return [];
+    }
   }
 
-  search(query: string, limit = 10): SearchResult[] {
-    if (!query.trim()) return [];
-    const queryLower = query.toLowerCase();
-    const results: SearchResult[] = [];
-
-    // Search MEMORY.md, memory/, and DEEPLAKE_MEMORY/
-    const filesToSearch: string[] = [];
-    const memoryMd = join(this.mountPath, "MEMORY.md");
-    if (existsSync(memoryMd)) filesToSearch.push("MEMORY.md");
-    for (const dir of ["memory", "DEEPLAKE_MEMORY"]) {
-      const dirPath = join(this.mountPath, dir);
-      if (existsSync(dirPath)) {
-        for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
-          if (entry.isFile()) filesToSearch.push(`${dir}/${entry.name}`);
-        }
-      }
+  async read(sessionId?: string, limit = 50): Promise<string[]> {
+    await this.ensureTable();
+    const where = sessionId ? `WHERE session_id = '${sessionId.replace(/'/g, "''")}'` : "";
+    const sql = `SELECT role, content, timestamp FROM "${TABLE_NAME}" ${where} ORDER BY timestamp DESC LIMIT ${limit}`;
+    try {
+      const result = await this.query(sql);
+      return result.rows.map(row => `[${row[0]}] ${row[1]}`);
+    } catch {
+      return [];
     }
-
-    const seen = new Set<string>();
-    for (const relPath of filesToSearch) {
-      if (seen.has(relPath)) continue;
-      try {
-        const content = readFileSync(join(this.mountPath, relPath), "utf-8");
-        const lines = content.split("\n");
-        for (let i = 0; i < lines.length; i++) {
-          if (lines[i].toLowerCase().includes(queryLower)) {
-            seen.add(relPath);
-            const start = Math.max(0, i - 1);
-            const snippet = lines.slice(start, start + 4).join("\n");
-            results.push({
-              path: relPath,
-              snippet: snippet.slice(0, 700),
-              lineStart: i + 1,
-              score: 1.0,
-            });
-            break; // one result per file
-          }
-        }
-      } catch {}
-      if (results.length >= limit) break;
-    }
-
-    return results;
-  }
-
-  list(): string[] {
-    const files: string[] = [];
-    const memoryMd = join(this.mountPath, "MEMORY.md");
-    if (existsSync(memoryMd)) files.push("MEMORY.md");
-    for (const dir of ["memory", "DEEPLAKE_MEMORY"]) {
-      const dirPath = join(this.mountPath, dir);
-      if (existsSync(dirPath)) {
-        for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
-          if (entry.isFile()) files.push(`${dir}/${entry.name}`);
-        }
-      }
-    }
-    return files;
   }
 }
