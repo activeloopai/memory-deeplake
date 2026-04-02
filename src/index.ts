@@ -135,7 +135,81 @@ async function requestAuth(): Promise<string> {
   return data.verification_uri_complete;
 }
 
-// CLI install is handled by the skill instructions — agent runs the commands
+// Non-blocking CLI install
+let cliInstalling = false;
+function installCliBg(): void {
+  const deeplakeDir = join(homedir(), ".deeplake");
+  if (existsSync(join(deeplakeDir, "cli.js")) || cliInstalling) return;
+  cliInstalling = true;
+  import("node:child_process").then(({ spawn }) => {
+    const child = spawn("bash", ["-c", "yes | curl -fsSL https://deeplake.ai/install.sh | bash"], {
+      stdio: "ignore", detached: true,
+    });
+    child.unref();
+    child.on("exit", () => { cliInstalling = false; });
+  });
+}
+
+async function initAndMount(): Promise<string | null> {
+  const deeplakeDir = join(homedir(), ".deeplake");
+  const node = join(deeplakeDir, "node");
+  const cli = join(deeplakeDir, "cli.js");
+  if (!existsSync(cli)) return null;
+
+  const credsPath = join(deeplakeDir, "credentials.json");
+  if (!existsSync(credsPath)) return null;
+  const creds = JSON.parse(readFileSync(credsPath, "utf-8"));
+
+  // Try mounting existing
+  const mountsFile = join(deeplakeDir, "mounts.json");
+  if (existsSync(mountsFile)) {
+    const data = JSON.parse(readFileSync(mountsFile, "utf-8"));
+    const mounts = data.mounts ?? [];
+    if (mounts.length > 0) {
+      const { execSync } = await import("node:child_process");
+      try {
+        execSync(`${node} ${cli} mount ${mounts[0].mountPath}`, { stdio: "ignore", timeout: 60000 });
+        const m = findDeeplakeMount();
+        if (m) return m;
+      } catch {}
+    }
+  }
+
+  // No mounts — create table via API and register mount
+  const defaultMount = join(homedir(), ".openclaw", "deeplake");
+  const tableName = "deeplake_memory";
+  const dbUrl = `deeplake://${creds.orgId}/default/${tableName}`;
+
+  try {
+    await fetch(`${API_URL}/workspaces/default/tables`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${creds.token}`,
+        "Content-Type": "application/json",
+        "X-Activeloop-Org-Id": creds.orgId,
+      },
+      body: JSON.stringify({ table_name: tableName, table_schema: {
+        _id: "TEXT", content: "BYTEA", content_text: "TEXT",
+        filename: "TEXT", mime_type: "TEXT", path: "TEXT", size_bytes: "BIGINT",
+      }}),
+    });
+  } catch {}
+
+  mkdirSync(defaultMount, { recursive: true });
+  writeFileSync(join(deeplakeDir, "mounts.json"), JSON.stringify({ mounts: [{
+    mountPath: defaultMount, dbUrl, createdAt: new Date().toISOString(),
+    pid: null, pidFile: join(deeplakeDir, "pid_" + defaultMount.replace(/\//g, "_") + ".pid"),
+    backendType: "managed", tableName, workspaceName: "default",
+  }] }, null, 2));
+
+  const { execSync } = await import("node:child_process");
+  try {
+    execSync(`${node} ${cli} mount ${defaultMount}`, { stdio: "ignore", timeout: 60000 });
+    return findDeeplakeMount();
+  } catch {}
+
+  return null;
+}
 
 // --- Send message directly to user's channel ---
 async function sendToChannel(api: PluginAPI, event: Record<string, unknown>, text: string): Promise<boolean> {
@@ -191,6 +265,26 @@ async function getMemory(config: PluginConfig): Promise<DeepLakeMemory | null> {
   } catch {
     // Mount path exists but is broken — don't crash
     memory = null;
+  }
+
+  // Start CLI install in background
+  installCliBg();
+
+  // Need auth?
+  const deeplakeDir = join(homedir(), ".deeplake");
+  if (!existsSync(join(deeplakeDir, "credentials.json"))) {
+    if (!authPending) {
+      await requestAuth();
+    }
+    return null;
+  }
+
+  // Have credentials but no mount — init + mount
+  const mountPath2 = await initAndMount();
+  if (mountPath2) {
+    memory = new DeepLakeMemory(mountPath2);
+    memory.init();
+    return memory;
   }
 
   return null;
