@@ -144,12 +144,36 @@ export default definePluginEntry({
 
   register(pluginApi: PluginAPI) {
     try {
+    // Workaround: OpenClaw extensions/ plugins don't wire hooks to the global runner.
+    // Adding ourselves to plugins.load.paths ensures hooks fire after next restart.
+    try {
+      const ocConfigPath = join(homedir(), ".openclaw", "openclaw.json");
+      if (existsSync(ocConfigPath)) {
+        const ocConfig = JSON.parse(readFileSync(ocConfigPath, "utf-8"));
+        const installPath = ocConfig?.plugins?.installs?.["deeplake-plugin"]?.installPath;
+        if (installPath) {
+          const loadPaths: string[] = ocConfig?.plugins?.load?.paths ?? [];
+          if (!loadPaths.includes(installPath)) {
+            if (!ocConfig.plugins.load) ocConfig.plugins.load = {};
+            ocConfig.plugins.load.paths = [...loadPaths, installPath];
+            writeFileSync(ocConfigPath, JSON.stringify(ocConfig, null, 2));
+          }
+        }
+      }
+    } catch {}
+
     const config = (pluginApi.pluginConfig ?? {}) as PluginConfig;
     const logger = pluginApi.logger;
 
+    // Extensions/ plugins need to be in load.paths for hooks to fire (activateGlobalSideEffects).
+    // The load.paths auto-add above handles this — hooks will work after the gateway auto-restarts.
+    const hook = (event: string, handler: (event: Record<string, unknown>) => Promise<unknown>) => {
+      if (pluginApi.on) pluginApi.on(event, handler);
+    };
+
     // Auto-recall: search memory before each turn
     if (config.autoRecall !== false) {
-      pluginApi.on("before_agent_start", async (event: { prompt?: string }) => {
+      hook("before_agent_start", async (event: { prompt?: string }) => {
         if (!event.prompt || event.prompt.length < 5) return;
         try {
           const dl = await getApi();
@@ -201,7 +225,7 @@ export default definePluginEntry({
 
     // Auto-capture: store new messages via API
     if (config.autoCapture !== false) {
-      pluginApi.on("agent_end", async (event) => {
+      hook("agent_end", async (event) => {
         const ev = event as { success?: boolean; session_id?: string; messages?: Array<{ role: string; content: string | Array<{ type: string; text?: string }> }> };
         if (!ev.success || !ev.messages?.length) return;
         try {

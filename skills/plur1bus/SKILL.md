@@ -1,7 +1,7 @@
 ---
 name: deeplake-plugin
 description: Cloud-backed shared memory for AI agents powered by DeepLake. Install once, memory persists across sessions, machines, and channels.
-allowed-tools: Bash, Read, Write, Edit
+allowed-tools: Read
 ---
 
 # DeepLake Memory
